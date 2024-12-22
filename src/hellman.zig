@@ -11,10 +11,11 @@ pub const AttackConfig = struct {
 
 pub const AttackStats = struct {
     n_comparisons: u64 = 0,
+    coordinates: ?struct { i: usize, j: usize } = null, // only null if no preimage; this is lame, but was added in the last minute.
 };
 
 pub const AttackResult = struct {
-    stats: ?AttackStats,
+    stats: AttackStats,
     preimage: ?Preimage,
 };
 
@@ -275,8 +276,8 @@ pub const HellmanTable = struct {
         const table = self.table orelse return HellmanTableErrors.TableNotInitialized;
 
         var y = h;
-        var found_at: ?u64 = null;
-        var chain_offset: u64 = undefined;
+        var found_at: ?usize = null;
+        var chain_offset: usize = undefined;
         var search_count: usize = 0;
 
         for (0..self.l) |j| { // find:
@@ -298,7 +299,7 @@ pub const HellmanTable = struct {
             var x: hash.HASH = table[i].x;
             if (chain_offset == 0) {
                 return .{
-                    .stats = .{ .n_comparisons = search_count },
+                    .stats = .{ .n_comparisons = search_count, .coordinates = .{ .i = i, .j = chain_offset } },
                     .preimage = Preimage{ .first = x },
                 };
             }
@@ -308,7 +309,7 @@ pub const HellmanTable = struct {
             }
 
             return .{
-                .stats = .{ .n_comparisons = search_count },
+                .stats = .{ .n_comparisons = search_count, .coordinates = .{ .i = i, .j = chain_offset } },
                 .preimage = Preimage{ .second = self.r.reduce(x) },
             };
         }

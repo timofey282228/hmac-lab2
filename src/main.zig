@@ -57,49 +57,11 @@ pub fn main() !void {
                         10,
                     );
                     try attackSpecificTable(allocator.allocator(), k, l, n);
-
                     break;
                 }
             }
         }
     }
-
-    // var redundancy: [consts.ALIGN_REDUNDANCY_LEN - consts.MY_HASH_LEN]u8 = undefined;
-    // // TODO: dynamic
-    // _ = try std.fmt.hexToBytes(&redundancy, "b61578bc95896e712956552f");
-    // var ht = hellman.HellmanTable.init(
-    //     allocator.allocator(),
-    //     1048576, // 20
-    //     4096, // 12
-    //     red.RedundancyFunc{ .vec = redundancy },
-    // );
-    // try ht.loadTable("tables/b61578bc95896e712956552f_1048576_4096.bin");
-    // std.debug.print("Sorting the table...\n", .{});
-    // try ht.sortTable();
-    // std.debug.print("Table sorted. Starting experiments...\n", .{});
-
-    // // var counter: u64 = 0;
-    // var prng = std.rand.DefaultPrng.init(blk: {
-    //     var seed: u64 = 0;
-    //     try std.posix.getrandom(std.mem.asBytes(&seed));
-    //     break :blk seed;
-    // });
-
-    // var counter: u64 = 0;
-    // const N = 10_000;
-    // for (0..N) |_| {
-    //     var vector: [256 / 8]u8 = undefined;
-    //     prng.random().bytes(&vector);
-
-    //     if (try search_table_log_result_ex(hash.hash(&vector), &ht)) |attack_result| {
-    //         std.debug.print("Random vector: {s}; found preimage in {d} cmps\n", .{
-    //             std.fmt.bytesToHex(vector, .lower),
-    //             attack_result.stats.?.n_comparisons,
-    //         });
-    //         counter += 1;
-    //     }
-    // }
-    // std.debug.print("Success rate: {d} / {d}", .{ counter, N });
 }
 
 pub fn genAllTableFiles(allocator: std.mem.Allocator, filemap_path: []const u8) !void {
@@ -213,7 +175,7 @@ pub fn search_table_log_result_ex(h: hash.HASH, table: *const hellman.HellmanTab
                     .{
                         std.fmt.bytesToHex(x, .upper),
                         std.fmt.bytesToHex(h, .upper),
-                        attack_result.stats.?.n_comparisons,
+                        attack_result.stats.n_comparisons,
                     },
                 );
                 return attack_result;
@@ -225,7 +187,7 @@ pub fn search_table_log_result_ex(h: hash.HASH, table: *const hellman.HellmanTab
                         .{
                             std.fmt.bytesToHex(x, .upper),
                             std.fmt.bytesToHex(h, .upper),
-                            attack_result.stats.?.n_comparisons,
+                            attack_result.stats.n_comparisons,
                         },
                     );
                     return attack_result;
@@ -275,7 +237,7 @@ pub fn attackAll(allocator: std.mem.Allocator) !void {
             if (try search_table_log_result_ex(hash.hash(&vector), &ht)) |attack_result| {
                 std.debug.print("Random vector: {s}; found preimage in {d} cmps\n", .{
                     std.fmt.bytesToHex(vector, .lower),
-                    attack_result.stats.?.n_comparisons,
+                    attack_result.stats.n_comparisons,
                 });
                 counter += 1;
             }
@@ -300,6 +262,11 @@ pub fn attackSpecificTable(allocator: std.mem.Allocator, k: usize, l: usize, n: 
 
     for (fmap.table_params) |table| {
         if (table.k == k and table.l == l) {
+            std.debug.print("Using table with k = {d}, l = {d}, redundancy function seed {s}\n", .{
+                table.k,
+                table.l,
+                std.fmt.bytesToHex(table.redundancy_vector, .upper),
+            });
             var ht = hellman.HellmanTable.init(
                 allocator,
                 k,
@@ -307,7 +274,7 @@ pub fn attackSpecificTable(allocator: std.mem.Allocator, k: usize, l: usize, n: 
                 .{ .vec = table.redundancy_vector },
             );
             try ht.loadTable(table.file_name);
-            try debugPrintAttack(n, prng.random(), &ht);
+            try debugPrintAttack2(n, prng.random(), &ht);
             break;
         }
     } else return AttackError.TableNotGenerated;
@@ -330,5 +297,51 @@ fn debugPrintAttack(n: usize, prng: std.Random, table: *const hellman.HellmanTab
             counter += 1;
         }
     }
+
     std.debug.print("Success rate: {d} / {d}\n", .{ counter, n });
+}
+
+fn debugPrintAttack2(n: usize, prng: std.Random, table: *const hellman.HellmanTable) !void {
+    var total_success: u64 = 0;
+    var misfires: u64 = 0;
+
+    for (0..n) |_| {
+        var vector: [256 / 8]u8 = undefined;
+        prng.bytes(&vector);
+
+        const random_vector_hex = std.fmt.bytesToHex(vector, .upper);
+        const random_vector_hash = hash.hash(&vector);
+        const attack_result = try table.searchEx(random_vector_hash);
+
+        if (attack_result.preimage) |preimage| {
+            const x: []const u8 = switch (preimage) {
+                .first => |x| &x,
+                .second => |x| &x,
+            };
+
+            if (!std.mem.eql(u8, &hash.hash(x), &random_vector_hash)) {
+                // std.debug.print(
+                //     "Fail at {d} {d}\n",
+                //     .{
+                //         attack_result.stats.coordinates.?.i,
+                //         attack_result.stats.coordinates.?.j,
+                //     },
+                // );
+                misfires += 1;
+                continue;
+            }
+
+            std.debug.print("{s}: h({}) = {s} (T = {d})\n", .{
+                random_vector_hex,
+                std.fmt.fmtSliceHexUpper(x),
+                std.fmt.bytesToHex(random_vector_hash, .upper),
+                attack_result.stats.n_comparisons,
+            });
+
+            total_success += 1;
+        }
+    }
+
+    std.debug.print("Success rate: {d} / {d} = {d}\n", .{ total_success, n, (@as(f64, @floatFromInt(total_success)) / @as(f64, @floatFromInt(n))) });
+    std.debug.print("Misfire rate: {d} / {d} = {d}\n", .{ misfires, n, (@as(f64, @floatFromInt(misfires)) / @as(f64, @floatFromInt(n))) });
 }
