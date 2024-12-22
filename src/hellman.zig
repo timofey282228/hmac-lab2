@@ -33,7 +33,7 @@ pub const HellmanTable = struct {
             // return std.mem.order(u8, &lhs.y, &rhs.y) == .lt;
         }
 
-        pub fn y_order(_: void, key: hash.HASH, mid_item: TableEntry) std.math.Order {
+        pub fn yOrder(_: void, key: hash.HASH, mid_item: TableEntry) std.math.Order {
             // comptime compareFn: fn(context:@TypeOf(context), key:@TypeOf(key), mid_item:T)math.Order
             const key_v: u32 = std.mem.readInt(u32, &key, .big);
             const mid: u32 = std.mem.readInt(u32, &mid_item.y, .big);
@@ -56,7 +56,6 @@ pub const HellmanTable = struct {
         std.posix.getrandom(std.mem.asBytes(&seed)) catch |err| {
             std.debug.print("std.posix.getrandom failed: {any}\n", .{err});
         };
-        std.debug.print("HT seed: {d}\n", .{seed});
 
         const xoshiro = std.Random.DefaultPrng.init(seed);
 
@@ -122,10 +121,10 @@ pub const HellmanTable = struct {
 
         const Builder = struct {
             fn builderFunc(builder_args: *BuilderArgs) void {
-                std.debug.print("Arg info: {any} for {any}\n", .{
-                    builder_args.entries.ptr,
-                    builder_args.entries.len,
-                });
+                // std.debug.print("Arg info: {any} for {any}\n", .{
+                //     builder_args.entries.ptr,
+                //     builder_args.entries.len,
+                // });
 
                 // init a prng in the current thread
                 var seed: u64 = undefined;
@@ -139,8 +138,6 @@ pub const HellmanTable = struct {
                 for (builder_args.entries) |*entry| {
                     entry.* = genEntry(builder_args.l, builder_args.r, random);
                 }
-
-                std.debug.print("exiting thread", .{});
             }
         };
 
@@ -153,14 +150,9 @@ pub const HellmanTable = struct {
         var thread_allocator = std.heap.ArenaAllocator.init(threadsafe_gpa.allocator());
         defer thread_allocator.deinit();
 
-        std.debug.print(
-            "Mind the size: {d}\n and the alignment: {d}\n",
-            .{ @sizeOf(TableEntry), @alignOf(TableEntry) },
-        );
-
         const step: u64 = self.k / cores;
-        std.debug.print("Step: {d}\n", .{step});
-        std.debug.print("K: {d}\n", .{self.k});
+        // std.debug.print("Step: {d}\n", .{step});
+        // std.debug.print("K: {d}\n", .{self.k});
 
         const additional_threads = cores - 1;
         var threads = try thread_allocator.allocator().alloc(std.Thread, additional_threads);
@@ -169,7 +161,7 @@ pub const HellmanTable = struct {
             const builderArgs = try thread_allocator.allocator().create(BuilderArgs);
             const end = ((i + 1) * step);
 
-            std.debug.print("End: {d}\n", .{end});
+            // std.debug.print("End: {d}\n", .{end});
 
             builderArgs.* = .{
                 .entries = table[i * step .. end],
@@ -184,10 +176,10 @@ pub const HellmanTable = struct {
             );
         }
 
-        std.debug.print(
-            "Generating {d} entries on main thread\n",
-            .{self.k - additional_threads * step},
-        );
+        // std.debug.print(
+        //     "Generating {d} entries on main thread\n",
+        //     .{self.k - additional_threads * step},
+        // );
 
         // we'll just finish the rest of the table in this thread
         var timer = try std.time.Timer.start();
@@ -195,22 +187,22 @@ pub const HellmanTable = struct {
             table[i] = genEntry(self.l, self.r, self.prng.random());
             if (i % (1 << 10) == 0) {
                 std.debug.print(
-                    "Generated entry: {d}; rate: {d} ns\r",
+                    "Main: generated entry: {d}; rate: ({d} / 2 * 10) ns \r",
                     .{ i, timer.lap() },
                 );
             }
         }
 
-        std.debug.print(
-            "Also calculating on the main thread: {d} - {d}",
-            .{ additional_threads * step, self.k },
-        );
+        // std.debug.print(
+        //     "Also calculating on the main thread: {d} - {d}\n",
+        //     .{ additional_threads * step, self.k },
+        // );
 
         // wait for the rest of the threads to finish
         for (0..additional_threads) |i| {
-            std.debug.print("Joining: {d}\n", .{i});
+            // std.debug.print("Joining: {d}\n", .{i});
             threads[i].join();
-            std.debug.print("Joined: {d}\n", .{i});
+            // std.debug.print("Joined: {d}\n", .{i});
         }
 
         self.table = table;
@@ -252,7 +244,7 @@ pub const HellmanTable = struct {
                 y,
                 table,
                 {},
-                TableEntry.y_order,
+                TableEntry.yOrder,
             ) orelse {
                 y = hash.hash(&self.r.reduce(y));
                 continue;
@@ -333,7 +325,7 @@ pub const HellmanTable = struct {
 
         while (start < end) {
             const mid: usize = (end + start) / 2;
-            const cmp = TableEntry.y_order({}, h, table[mid]);
+            const cmp = TableEntry.yOrder({}, h, table[mid]);
 
             count.* += 1;
             // std.debug.print("{} {d} {d} {d}\n", .{ cmp, start, mid, end });
