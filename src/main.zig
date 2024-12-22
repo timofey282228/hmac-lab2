@@ -37,8 +37,7 @@ pub fn main() !void {
                     std.debug.print("Attacking random hashes on all stored tables\n", .{});
                     try attackAll(allocator.allocator());
                     break;
-                }
-                if (std.mem.eql(u8, kw, "specific")) {
+                } else if (std.mem.eql(u8, kw, "specific")) {
                     std.debug.print("Attacking random hashes on the table with specified parameters\n", .{});
 
                     const k = try std.fmt.parseInt(
@@ -58,9 +57,36 @@ pub fn main() !void {
                     );
                     try attackSpecificTable(allocator.allocator(), k, l, n);
                     break;
+                } else if (std.mem.eql(u8, kw, "multitable")) {
+                    const k = try std.fmt.parseInt(
+                        usize,
+                        arguments.next() orelse return ArgumentParsingError.ExpectedArgument,
+                        10,
+                    );
+                    const l = try std.fmt.parseInt(
+                        usize,
+                        arguments.next() orelse return ArgumentParsingError.ExpectedArgument,
+                        10,
+                    );
+                    const n = try std.fmt.parseInt(
+                        usize,
+                        arguments.next() orelse return ArgumentParsingError.ExpectedArgument,
+                        10,
+                    );
+                    try attackMultitable(allocator.allocator(), k, l, n);
+                    break;
                 }
             }
         }
+    } else {
+        const help =
+            \\ hmac2 {generate | attack }
+            \\ - generate {all}
+            \\ - attack {all | specific | multitable}
+            \\   - specific <k> <l> <n>
+            \\   - multitable <k> <l> <n>
+        ;
+        std.debug.print("{s}", .{help});
     }
 }
 
@@ -344,4 +370,93 @@ fn debugPrintAttack2(n: usize, prng: std.Random, table: *const hellman.HellmanTa
 
     std.debug.print("Success rate: {d} / {d} = {d}\n", .{ total_success, n, (@as(f64, @floatFromInt(total_success)) / @as(f64, @floatFromInt(n))) });
     std.debug.print("Misfire rate: {d} / {d} = {d}\n", .{ misfires, n, (@as(f64, @floatFromInt(misfires)) / @as(f64, @floatFromInt(n))) });
+}
+
+pub fn statsAttackHash(h: hash.HASH, table: *const hellman.HellmanTable) !struct {
+    success: bool = false,
+    misfire: bool = false,
+    cmps: usize = 0,
+} {
+    var success: bool = false;
+    var misfire: bool = false;
+
+    const attack_result = try table.searchEx(h);
+
+    if (attack_result.preimage) |preimage| {
+        const x: []const u8 = switch (preimage) {
+            .first => |x| &x,
+            .second => |x| &x,
+        };
+
+        if (!std.mem.eql(u8, &hash.hash(x), &h)) {
+            misfire = true;
+        } else {
+            success = true;
+        }
+
+        return .{ .success = success, .misfire = misfire, .cmps = attack_result.stats.n_comparisons };
+    }
+    return .{};
+}
+
+pub fn attackMultitable(allocator: std.mem.Allocator, k: usize, l: usize, n: usize) !void {
+    const tables = try allocator.alloc(hellman.HellmanTable, k);
+    defer allocator.free(tables);
+
+    for (tables) |*table| {
+        const redundancy_function = red.newRedundancyFunc();
+        table.* = hellman.HellmanTable.init(allocator, k, l, redundancy_function);
+    }
+
+    defer {
+        for (tables) |*table| {
+            table.deinit();
+        }
+    }
+
+    for (tables, 0..) |*table, i| {
+        try table.buildTableParallel();
+        _ = i;
+
+        // const filename = try std.fmt.allocPrint(
+        //     allocator,
+        //     "multitable_{s}_{d}.bin",
+        //     .{ std.fmt.bytesToHex(table.r.vec, .lower), i },
+        // );
+        // defer allocator.free(filename);
+
+        // const file = try std.fs.cwd().createFile(filename, .{});
+        // defer file.close();
+        // try table.storeTableF(file);
+    }
+
+    var prng = getPrng();
+
+    var successes: usize = 0;
+    var misfires: usize = 0;
+    var cmps: usize = 0;
+
+    for (0..n) |i| {
+        _ = i;
+        // std.debug.print("Processing hash {d} across all tables\n", .{i});
+        var random_vector: [256 / 8]u8 = undefined;
+        prng.random().bytes(&random_vector);
+
+        const random_vector_hash = hash.hash(&random_vector);
+
+        for (tables) |ht| {
+            const r = try statsAttackHash(random_vector_hash, &ht);
+            if (r.success) {
+                successes += 1;
+                cmps += r.cmps;
+            }
+
+            if (r.misfire) misfires += 1;
+        }
+    }
+
+    std.debug.print(
+        "For {d}: successes: {d}, misfires: {d}, cmps: {d}\n",
+        .{ n, successes, misfires, cmps },
+    );
 }
