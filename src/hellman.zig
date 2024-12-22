@@ -5,10 +5,40 @@ const hash = @import("hash.zig");
 
 const HellmanTableErrors = error{TableNotInitialized};
 
+pub const AttackConfig = struct {
+    stats: bool,
+};
+
+pub const AttackStats = struct {
+    n_comparisons: u64 = 0,
+};
+
+pub const AttackResult = struct {
+    stats: ?AttackStats,
+    preimage: ?Preimage,
+};
+
 pub const HellmanTable = struct {
     const TableEntry = struct {
         x: [consts.MY_HASH_LEN]u8,
         y: [consts.MY_HASH_LEN]u8,
+
+        pub fn lessThanFn(_: void, lhs: TableEntry, rhs: TableEntry) bool {
+            const left: u32 = std.mem.readInt(u32, &lhs.y, .big);
+            const right: u32 = std.mem.readInt(u32, &rhs.y, .big);
+
+            // std.debug.print("CMP: {X} < {X} ? {}\n", .{ left, right, left < right });
+            return left < right;
+
+            // return std.mem.order(u8, &lhs.y, &rhs.y) == .lt;
+        }
+
+        pub fn y_order(_: void, key: hash.HASH, mid_item: TableEntry) std.math.Order {
+            // comptime compareFn: fn(context:@TypeOf(context), key:@TypeOf(key), mid_item:T)math.Order
+            const key_v: u32 = std.mem.readInt(u32, &key, .big);
+            const mid: u32 = std.mem.readInt(u32, &mid_item.y, .big);
+            if (key_v < mid) return .lt else if (key_v == mid) return .eq else return .gt;
+        }
     };
 
     k: u64,
@@ -20,13 +50,13 @@ pub const HellmanTable = struct {
 
     const Self = @This();
 
-    pub fn init(allocator: std.mem.Allocator, k: u64, l: u64, r: red.RedundancyFunc) !Self {
+    pub fn init(allocator: std.mem.Allocator, k: u64, l: u64, r: red.RedundancyFunc) Self {
         var seed: u64 = 0;
 
         std.posix.getrandom(std.mem.asBytes(&seed)) catch |err| {
             std.debug.print("std.posix.getrandom failed: {any}\n", .{err});
         };
-        std.debug.print("Seed: {d}\n", .{seed});
+        std.debug.print("HT seed: {d}\n", .{seed});
 
         const xoshiro = std.Random.DefaultPrng.init(seed);
 
@@ -97,7 +127,7 @@ pub const HellmanTable = struct {
                     builder_args.entries.len,
                 });
 
-                // init a prng in this thread
+                // init a prng in the current thread
                 var seed: u64 = undefined;
                 std.posix.getrandom(std.mem.asBytes(&seed)) catch |err| {
                     std.debug.print("std.posix.getrandom failed: {any}\n", .{err});
@@ -124,7 +154,7 @@ pub const HellmanTable = struct {
         defer thread_allocator.deinit();
 
         std.debug.print(
-            "Mind the size: {d}\nand the alignment: {d}\n",
+            "Mind the size: {d}\n and the alignment: {d}\n",
             .{ @sizeOf(TableEntry), @alignOf(TableEntry) },
         );
 
@@ -187,17 +217,18 @@ pub const HellmanTable = struct {
     }
 
     pub fn debugPrintTable(self: *const Self) void {
-        const table = self.table orelse {
+        const table: []TableEntry = self.table orelse {
             std.debug.print("Table not built", .{});
             return;
         };
 
-        for (0..self.k) |i| {
-            const x = table[i].x;
-            const y = table[i].y;
-            std.debug.print("{s} -> {s}\n", .{
+        for (table) |*entry| {
+            const x = entry.*.x;
+            const y = entry.*.y;
+            std.debug.print("{s} -> {s} ({*})\n", .{
                 std.fmt.bytesToHex(x, .upper),
                 std.fmt.bytesToHex(y, .upper),
+                &entry.y,
             });
         }
     }
@@ -215,33 +246,21 @@ pub const HellmanTable = struct {
         var found_at: ?u64 = null;
         var chain_offset: u64 = undefined;
 
-        find: for (0..self.l) |j| {
-            std.debug.print("Trying chian offset {d}\n", .{j});
-            // linsearch hell yeah
-            for (0..self.k) |i| {
-                const table_val = std.mem.bytesAsValue(u32, &table[i].y);
-                const y_val = std.mem.bytesAsValue(u32, &y);
+        for (0..self.l) |j| { // find:
+            const i = std.sort.binarySearch(
+                TableEntry,
+                y,
+                table,
+                {},
+                TableEntry.y_order,
+            ) orelse {
+                y = hash.hash(&self.r.reduce(y));
+                continue;
+            };
 
-                std.debug.print("Comparing {s} with {s}\n", .{
-                    std.fmt.bytesToHex(y, .upper),
-                    std.fmt.bytesToHex(table[i].y, .upper),
-                });
-
-                if (y_val.* == table_val.*) {
-                    std.debug.print("Found. Target: {s}; table {d}:{d}: {s}\n", .{
-                        std.fmt.bytesToHex(y, .upper),
-                        i,
-                        j,
-                        std.fmt.bytesToHex(table[i].y, .upper),
-                    });
-
-                    found_at = i;
-                    chain_offset = j;
-                    break :find;
-                }
-            }
-
-            y = hash.hash(&self.r.reduce(y));
+            found_at = i;
+            chain_offset = j;
+            break;
         }
 
         if (found_at) |i| {
@@ -250,17 +269,80 @@ pub const HellmanTable = struct {
                 return Preimage{ .first = x };
             }
 
-            std.debug.print("i: {d}, j: {d}\n", .{ i, chain_offset });
-
             for (0..self.l - 1 - chain_offset) |_| {
-                std.debug.print("X: {s}\n", .{std.fmt.bytesToHex(x, .upper)});
-                std.debug.print("h(R(X))\n", .{});
                 x = hash.hash(&self.r.reduce(x));
-
-                std.debug.print("X: {s}\n", .{std.fmt.bytesToHex(x, .upper)});
             }
 
             return Preimage{ .second = self.r.reduce(x) };
+        }
+
+        return null;
+    }
+
+    pub fn searchEx(self: *const Self, h: hash.HASH) !AttackResult {
+        const table = self.table orelse return HellmanTableErrors.TableNotInitialized;
+
+        var y = h;
+        var found_at: ?u64 = null;
+        var chain_offset: u64 = undefined;
+        var search_count: usize = 0;
+
+        for (0..self.l) |j| { // find:
+            const i = binsearchStat(
+                y,
+                table,
+                &search_count,
+            ) orelse {
+                y = hash.hash(&self.r.reduce(y));
+                continue;
+            };
+
+            found_at = i;
+            chain_offset = j;
+            break;
+        }
+
+        if (found_at) |i| {
+            var x: hash.HASH = table[i].x;
+            if (chain_offset == 0) {
+                return .{
+                    .stats = .{ .n_comparisons = search_count },
+                    .preimage = Preimage{ .first = x },
+                };
+            }
+
+            for (0..self.l - 1 - chain_offset) |_| {
+                x = hash.hash(&self.r.reduce(x));
+            }
+
+            return .{
+                .stats = .{ .n_comparisons = search_count },
+                .preimage = Preimage{ .second = self.r.reduce(x) },
+            };
+        }
+
+        return .{
+            .stats = .{ .n_comparisons = search_count },
+            .preimage = null,
+        };
+    }
+
+    fn binsearchStat(h: hash.HASH, table: []TableEntry, count: *usize) ?usize {
+        var start: usize = 0;
+        var end: usize = table.len;
+
+        while (start < end) {
+            const mid: usize = (end + start) / 2;
+            const cmp = TableEntry.y_order({}, h, table[mid]);
+
+            count.* += 1;
+            // std.debug.print("{} {d} {d} {d}\n", .{ cmp, start, mid, end });
+
+            switch (cmp) {
+                .lt => end = mid,
+                .gt => start = mid + 1,
+                .eq => return mid,
+            }
         }
 
         return null;
@@ -289,6 +371,16 @@ pub const HellmanTable = struct {
         defer file.close();
 
         try file.writeAll(std.mem.sliceAsBytes(table));
+    }
+
+    pub fn storeTableF(self: *const Self, file: std.fs.File) !void {
+        const table = self.table orelse return HellmanTableErrors.TableNotInitialized;
+        try file.writeAll(std.mem.sliceAsBytes(table));
+    }
+
+    pub fn sortTable(self: *Self) !void {
+        const table = self.table orelse return HellmanTableErrors.TableNotInitialized;
+        std.sort.heap(TableEntry, table, {}, TableEntry.lessThanFn);
     }
 };
 
